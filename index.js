@@ -82,11 +82,12 @@ async function startBot(phoneNumber) {
     version,
     auth: state,
     printQRInTerminal: false,
+    logger: require('pino')({ level: 'silent' }), // silence Baileys' own internal log lines (e.g. "not logged in, attempting registration...") — we print our own clearer status lines instead
     browser: ['Ubuntu', 'Chrome', '22.04.4'],
     syncFullHistory: false,
     markOnlineOnConnect: false,
-    connectTimeoutMs: 60000,
-    defaultQueryTimeoutMs: 60000,
+    connectTimeoutMs: 20000, // was 60000 — a stuck handshake now surfaces in ~20s instead of silently waiting a full minute
+    defaultQueryTimeoutMs: 20000,
     keepAliveIntervalMs: 30000,
     retryRequestDelayMs: 1000,
   });
