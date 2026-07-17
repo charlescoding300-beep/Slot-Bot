@@ -1,0 +1,143 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>CYBER X ARMY</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=Orbitron:wght@600;800;900&family=JetBrains+Mono:wght@400;600&family=Inter:wght@400;500;600&display=swap" rel="stylesheet">
+<link rel="stylesheet" href="/style.css">
+</head>
+<body>
+
+  <!-- TOP GREETING BAR -->
+  <nav class="topbar">
+    <div class="greeting">
+      <span class="greeting-hi">Hi,</span>
+      <span class="greeting-name" id="greetingName">Player</span>
+    </div>
+    <button id="logoutBtn" class="ghost-btn hidden">Log out</button>
+  </nav>
+
+  <!-- LOGIN CARD -->
+  <section id="loginSection" class="card login-card">
+    <h2>Log in</h2>
+    <p class="muted">We'll send a 6-digit code to your WhatsApp — the same number linked to the bot.</p>
+
+    <form id="phoneForm" class="stack">
+      <label for="phone">WhatsApp number (with country code)</label>
+      <input id="phone" type="tel" placeholder="2348012345678" autocomplete="tel" required>
+      <button type="submit" class="primary-btn">Send code</button>
+    </form>
+
+    <form id="codeForm" class="stack hidden">
+      <label for="code">6-digit code</label>
+      <input id="code" type="text" inputmode="numeric" maxlength="6" placeholder="000000" required>
+      <button type="submit" class="primary-btn">Verify &amp; log in</button>
+    </form>
+
+    <p id="loginError" class="error hidden"></p>
+  </section>
+
+  <!-- MAIN APP VIEW (shown after login) -->
+  <main id="playerSection" class="hidden">
+
+    <!-- BIG WALLET BALANCE CARD -->
+    <section class="balance-card">
+      <div class="balance-top">
+        <span class="balance-label">👛 Wallet Balance <span class="eye" id="toggleEye">👁️</span></span>
+        <span class="history-link" id="historyLink">Activity History ›</span>
+      </div>
+      <div class="balance-amount" id="bigBalance">🪙 0</div>
+      <div class="balance-bottom">
+        <span class="muted small">Use .deposit &lt;amount&gt; on WhatsApp to save to your bank</span>
+      </div>
+    </section>
+
+    <!-- LATEST 2 ACTIVITY PREVIEW (mimics a transaction history strip) -->
+    <section class="preview-feed" id="previewFeed"></section>
+
+    <!-- 3 STAT BOXES -->
+    <section class="stat-boxes">
+      <div class="stat-box">
+        <span class="stat-box-icon">👛</span>
+        <span class="stat-box-value mono" id="boxWallet">0</span>
+        <span class="stat-box-label">Wallet</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-box-icon">⚔️</span>
+        <span class="stat-box-value mono" id="boxArmy">0</span>
+        <span class="stat-box-label">Fighters</span>
+      </div>
+      <div class="stat-box">
+        <span class="stat-box-icon">🏦</span>
+        <span class="stat-box-value mono" id="boxBank">0</span>
+        <span class="stat-box-label">Bank</span>
+      </div>
+    </section>
+
+    <!-- FEATURE GRID -->
+    <section class="feature-grid">
+      <div class="feature"><span class="feature-icon">🎰</span><label>Slots</label></div>
+      <div class="feature"><span class="feature-icon">⚔️</span><label>Army</label></div>
+      <div class="feature"><span class="feature-icon">🥊</span><label>Battle</label></div>
+      <div class="feature"><span class="feature-icon">⛏️</span><label>Dig</label></div>
+      <div class="feature"><span class="feature-icon">👛</span><label>Beg</label></div>
+      <div class="feature"><span class="feature-icon">💸</span><label>Donate</label></div>
+      <div class="feature"><span class="feature-icon">🏆</span><label>Leaders</label></div>
+      <div class="feature"><span class="feature-icon">➕</span><label>More</label></div>
+    </section>
+
+    <!-- ARMY DETAIL -->
+    <div class="card army-card">
+      <h2>Your Army</h2>
+      <div class="army-grid">
+        <div class="unit"><span class="unit-emoji">⚔️</span><span id="unitSoldier">0</span><label>Swordsmen</label></div>
+        <div class="unit"><span class="unit-emoji">🏹</span><span id="unitArcher">0</span><label>Archers</label></div>
+        <div class="unit"><span class="unit-emoji">🗿</span><span id="unitGiant">0</span><label>Giants</label></div>
+      </div>
+      <div class="hp-bar-wrap">
+        <div class="hp-bar-label"><span>Base HP</span><span id="hpText">1000 / 1000</span></div>
+        <div class="hp-bar"><div class="hp-bar-fill" id="hpFill"></div></div>
+      </div>
+      <p class="muted small">💥 Total Attack Power: <span id="totalDamage" class="mono">0</span></p>
+    </div>
+
+    <!-- QUICK SPIN MINI-GAME -->
+    <div class="card spin-card">
+      <h2>Quick Spin</h2>
+      <p class="muted">A free bonus spin, separate from .slots on WhatsApp. Once every 5 minutes.</p>
+      <div class="spin-display" id="spinDisplay">🎰</div>
+      <button id="spinBtn" class="primary-btn gold-btn">SPIN</button>
+      <p id="spinMessage" class="spin-message"></p>
+    </div>
+
+    <!-- LIVE GLOBAL ACTIVITY FEED -->
+    <div class="card activity-card" id="activitySection">
+      <h2>🔴 Live Activity</h2>
+      <p class="muted">Every player's recent wins and losses, across Slots, Dig, and Battle.</p>
+      <div class="activity-list" id="activityList"></div>
+    </div>
+
+    <!-- LEADERBOARD -->
+    <div class="card leaderboard-card">
+      <h2>Top Coin Holders</h2>
+      <ol id="leaderboardList" class="leaderboard-list"></ol>
+    </div>
+  </main>
+
+  <!-- BOTTOM NAV (cosmetic — scrolls to sections) -->
+  <nav class="bottom-nav hidden" id="bottomNav">
+    <button data-target="body" class="nav-item active"><span>🏠</span>Home</button>
+    <button data-target=".army-card" class="nav-item"><span>⚔️</span>Army</button>
+    <button data-target="#activitySection" class="nav-item"><span>🔴</span>Activity</button>
+    <button data-target=".leaderboard-card" class="nav-item"><span>🏆</span>Ranks</button>
+  </nav>
+
+  <footer class="site-footer">
+    <p>© 𝕮𝖄𝕭𝙀𝙍 𝖃</p>
+  </footer>
+
+  <script src="/app.js"></script>
+</body>
+</html>
