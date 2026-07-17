@@ -1,11 +1,21 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 // index.js — CYBER X Army Bot main entry point
 //
-// Connection logic is modeled directly on a minimal test file that was
-// PROVEN to actually connect on this device — same Boom-based disconnect
-// handling, same single pairing request, no unnecessary moving parts.
-// The only thing swapped in is Redis for session storage instead of local
-// files, since Render's free tier wipes local files on every restart.
+// Connection logic follows the CYBER X SLOT BOT UPDATE spec exactly:
+//   - Pairing code is requested ONCE, only when connection === 'open' and
+//     creds aren't registered yet — never immediately after makeWASocket().
+//   - On confirmed logout (or 401), the stale Redis session is cleared
+//     automatically and a fresh pairing code gets requested on the next
+//     attempt — the bot never keeps retrying with dead credentials.
+//   - If BOT_PHONE_NUMBER changes, ONLY the old number's session is
+//     cleared — a still-valid session for the current number is never
+//     touched or deleted.
+//   - Simple fixed reconnect delay (not exponential backoff) — kept
+//     intentionally simple per spec, to avoid overcomplicating the retry
+//     logic while systemGuard's watchdog handles genuinely stuck cases.
+//   - Player game data (lib/dropStore.js, gameStore.js, etc.) lives under
+//     entirely separate Redis keys and is never touched by any session
+//     clearing here.
 //
 // Wires together:
 //   - Baileys connection via pairing code (no QR), official @whiskeysockets/baileys
@@ -22,12 +32,16 @@ const {
   DisconnectReason,
   fetchLatestBaileysVersion,
 } = require('@whiskeysockets/baileys');
-const baileysLib = require('@whiskeysockets/baileys');
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const path = require('path');
 
-const { useRedisAuthState } = require('./lib/redisAuthState');
+const {
+  useRedisAuthState,
+  clearSession,
+  getLastPhoneNumber,
+  setLastPhoneNumber,
+} = require('./lib/redisAuthState');
 const botConfig = require('./lib/botConfig');
 const { withWatermark } = require('./lib/watermark');
 const { startWebServer } = require('./web/server');
@@ -58,9 +72,10 @@ function loadCommands() {
 let currentSock = null;
 
 async function startBot(phoneNumber) {
-  // Same shape as useMultiFileAuthState('auth') from the proven test file —
-  // just backed by Redis instead of a local folder.
-  const { state, saveCreds } = await useRedisAuthState(phoneNumber, baileysLib);
+  // Reuses a valid session automatically if one exists in Redis for this
+  // exact phone number. Never deletes a valid session on its own — clearing
+  // only ever happens explicitly, from the logout/number-change logic below.
+  const { state, saveCreds } = await useRedisAuthState(phoneNumber);
   const { version } = await fetchLatestBaileysVersion();
 
   const sock = makeWASocket({
@@ -76,27 +91,52 @@ async function startBot(phoneNumber) {
     retryRequestDelayMs: 1000,
   });
 
-  // Single pairing request — no duplicate/racing attempt anywhere else.
-  if (!sock.authState.creds.registered) {
-    const number = phoneNumber.replace(/[^0-9]/g, '');
-    try {
-      const code = await sock.requestPairingCode(number);
-      console.log(`\n🔗 Pairing code for ${number}: ${code}\n`);
-      console.log('Enter this in WhatsApp: Linked Devices > Link with phone number\n');
-    } catch (err) {
-      console.error('[pairing] Failed to request pairing code:', err.message);
-    }
-  }
+  // Guards against requesting more than one pairing code at the same time
+  // for this socket instance.
+  let pairingRequested = false;
 
   sock.ev.on('creds.update', saveCreds);
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
 
-    if (connection === 'close') {
-      // Boom-based status extraction — same as the proven test file.
+    if (connection === 'connecting') {
+      console.log('Connecting to WhatsApp...');
+    } else if (connection === 'open') {
+      // Request the pairing code ONLY once the connection is actually
+      // open — never immediately after makeWASocket(), which fires before
+      // the transport is ready and fails instantly.
+      if (!sock.authState.creds.registered && !pairingRequested) {
+        pairingRequested = true;
+        try {
+          const number = phoneNumber.replace(/[^0-9]/g, '');
+          const code = await sock.requestPairingCode(number);
+          console.log(`\n🔗 Pairing code generated for ${number}: ${code}\n`);
+          console.log('Enter this in WhatsApp: Linked Devices > Link with phone number\n');
+        } catch (err) {
+          console.error('[pairing] Failed to request pairing code:', err.message);
+          pairingRequested = false; // allow a retry on the next 'open'
+        }
+      }
+
+      systemGuard.markActivity();
+      console.log(`✅ Connected: ${phoneNumber}`);
+      console.log('Credentials saved.');
+
+      const config = await botConfig.getConfig();
+      if (!config.owner) {
+        await botConfig.setOwner(sock.user.id);
+        console.log(`👑 Owner set to ${sock.user.id}`);
+      }
+
+      if (!global.__cyberXKeepAliveStarted) {
+        global.__cyberXKeepAliveStarted = true;
+        startKeepAlivePing();
+        console.log('Keepalive started.');
+      }
+    } else if (connection === 'close') {
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
-      const loggedOut = statusCode === DisconnectReason.loggedOut;
+      const loggedOut = statusCode === DisconnectReason.loggedOut || statusCode === 401;
 
       console.log('========== CONNECTION CLOSED ==========');
       console.log('Status Code:', statusCode);
@@ -105,31 +145,21 @@ async function startBot(phoneNumber) {
       console.log('=======================================');
 
       if (loggedOut) {
-        console.log('[session] Logged out — a fresh pairing code will be needed on next start.');
-      } else {
-        console.log('[reconnect] Reconnecting...');
+        console.log('Logged out — clearing stale session, a fresh pairing code will be requested.');
         try {
-          sock.end(undefined); // close cleanly before creating a new socket
-        } catch (_) {
-          // already closed — fine
+          await clearSession(phoneNumber);
+          console.log('Session cleared.');
+        } catch (err) {
+          console.error('[session] Failed to clear session after logout:', err.message);
         }
-        currentSock = await startBot(phoneNumber);
-      }
-    } else if (connection === 'open') {
-      systemGuard.markActivity();
-      console.log(`✅ ${phoneNumber} connected successfully`);
-
-      const config = await botConfig.getConfig();
-      if (!config.owner) {
-        await botConfig.setOwner(sock.user.id);
-        console.log(`👑 Owner set to ${sock.user.id}`);
       }
 
-      if (!global.__cyberXWebStarted) {
-        startWebServer(sock);
-        global.__cyberXWebStarted = true;
-        startKeepAlivePing();
-      }
+      console.log('Reconnecting...');
+      // Simple fixed delay — kept deliberately simple rather than
+      // exponential backoff, per spec. systemGuard's watchdog independently
+      // handles a socket that's genuinely stuck.
+      await new Promise((r) => setTimeout(r, 3000));
+      currentSock = await startBot(phoneNumber);
     }
   });
 
@@ -217,6 +247,15 @@ function startKeepAlivePing() {
     console.error('❌ Set BOT_PHONE_NUMBER in your environment variables (e.g. 2348012345678) and redeploy.');
     process.exit(1);
   }
+  const trimmedNumber = number.trim();
+
+  // Start the real web server immediately — before WhatsApp even begins
+  // connecting — so Render's port scan always finds an open port right
+  // away, regardless of how long pairing/reconnect takes. It's handed a
+  // lazy accessor (not a live sock, which doesn't exist yet) so routes can
+  // check "is the bot connected right now?" at request time instead.
+  startWebServer(() => currentSock);
+  console.log('Web server started.');
 
   systemGuard.startCrashHandlers();
   systemGuard.startMemoryGuard();
@@ -224,7 +263,24 @@ function startKeepAlivePing() {
     if (currentSock) currentSock.end(new Error('stale connection watchdog restart'));
   });
 
-  currentSock = await startBot(number.trim());
+  // If BOT_PHONE_NUMBER changed since the last run, clear ONLY the old
+  // number's session — a still-valid session for the current number is
+  // never touched.
+  try {
+    const lastNumber = await getLastPhoneNumber();
+    if (lastNumber && lastNumber !== trimmedNumber) {
+      console.log(`[session] BOT_PHONE_NUMBER changed (${lastNumber} -> ${trimmedNumber}) — clearing old session only.`);
+      await clearSession(lastNumber);
+      console.log('Session cleared.');
+    } else if (lastNumber === trimmedNumber) {
+      console.log('Session restored.');
+    }
+    await setLastPhoneNumber(trimmedNumber);
+  } catch (err) {
+    console.error('[session] Failed to check/update last phone number marker:', err.message);
+  }
+
+  currentSock = await startBot(trimmedNumber);
 })();
 
 module.exports = { startBot, loadCommands, commands };

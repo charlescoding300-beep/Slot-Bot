@@ -3,8 +3,12 @@
 // DMs you a code — no separate password to manage). Once logged in you can
 // see your coins/army, and play a quick mini-game for a few extra coins.
 //
-// This does NOT run standalone — call startWebServer(sock) from index.js
-// once the bot is connected, so OTP codes can actually be sent.
+// Takes a getSock() ACCESSOR FUNCTION instead of a live sock, so this server
+// can start immediately at boot — before WhatsApp has even connected — which
+// is what lets Render detect an open port right away instead of waiting on
+// pairing/reconnect logic. Only the OTP-sending route actually needs a live
+// socket; it checks getSock() at request time and returns 503 if the bot
+// isn't connected yet, rather than the whole server being unable to start.
 
 const express = require('express');
 const path = require('path');
@@ -19,7 +23,7 @@ const SPIN_COOLDOWN_SECONDS = 5 * 60; // 5 minutes between free web mini-game sp
 const SPIN_MIN_WIN = 20;
 const SPIN_MAX_WIN = 150;
 
-function startWebServer(sock, port = process.env.PORT || 4000) {
+function startWebServer(getSock, port = process.env.PORT || 4000) {
   const app = express();
   app.use(express.json());
   app.use(cookieParser());
@@ -36,6 +40,12 @@ function startWebServer(sock, port = process.env.PORT || 4000) {
     if (!phone || authStore.normalizePhone(phone).length < 8) {
       return res.status(400).json({ error: 'Enter a valid WhatsApp number with country code.' });
     }
+
+    const sock = getSock();
+    if (!sock) {
+      return res.status(503).json({ error: 'Bot is still connecting to WhatsApp — try again in a moment.' });
+    }
+
     const code = await authStore.createOTP(phone);
     try {
       await sock.sendMessage(phoneToJid(phone), {
@@ -64,7 +74,6 @@ function startWebServer(sock, port = process.env.PORT || 4000) {
   });
 
   // ---- middleware: require login for everything under /api/me* --------
-
   async function requireAuth(req, res, next) {
     const phone = await authStore.getSessionPhone(req.cookies.session);
     if (!phone) return res.status(401).json({ error: 'Not logged in.' });
@@ -74,7 +83,6 @@ function startWebServer(sock, port = process.env.PORT || 4000) {
   }
 
   // ---- player data -----------------------------------------------------
-
   app.get('/api/me', requireAuth, async (req, res) => {
     const user = await gameStore.getUser(req.jid);
     const army = await armyStore.getArmy(req.jid);
@@ -110,7 +118,6 @@ function startWebServer(sock, port = process.env.PORT || 4000) {
   });
 
   // ---- mini-game: quick coin spin, separate from the WhatsApp .slots ---
-
   app.post('/api/play-spin', requireAuth, async (req, res) => {
     const remaining = await gameStore.checkAndSetCooldown('webspin', req.jid, SPIN_COOLDOWN_SECONDS);
     if (remaining > 0) {
@@ -119,6 +126,12 @@ function startWebServer(sock, port = process.env.PORT || 4000) {
     const win = Math.floor(Math.random() * (SPIN_MAX_WIN - SPIN_MIN_WIN + 1)) + SPIN_MIN_WIN;
     const newBalance = await gameStore.adjustWallet(req.jid, win);
     res.json({ won: win, balance: newBalance });
+  });
+
+  // Simple root route so Render's health check / port scan sees a response
+  // immediately, even before WhatsApp has connected.
+  app.get('/', (req, res) => {
+    res.send('CYBER X Army is running.');
   });
 
   app.listen(port, () => console.log(`🎰 CYBER X Army web site running on port ${port}`));
