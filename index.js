@@ -32,6 +32,7 @@ const botConfig = require('./lib/botConfig');
 const { withWatermark } = require('./lib/watermark');
 const { startWebServer } = require('./web/server');
 const systemGuard = require('./lib/systemGuard');
+const dropStore = require('./lib/dropStore');
 
 const commands = new Map();
 
@@ -142,6 +143,25 @@ async function startBot(phoneNumber) {
 
     const from = msg.key.remoteJid;
     const sender = msg.key.participant || msg.key.remoteJid;
+
+    // Random unit drops — only in group chats, lazily rolled on activity
+    // rather than a true timer across every group (see lib/dropStore.js).
+    if (from.endsWith('@g.us')) {
+      try {
+        const hasActive = await dropStore.hasActiveDrop(from);
+        if (!hasActive && (await dropStore.canSpawnDrop(from)) && Math.random() < 0.15) {
+          const tier = await dropStore.createDrop(from);
+          await dropStore.markDropSpawned(from);
+          await sock.sendMessage(from, {
+            text: withWatermark(
+              `${tier.tag} *${tier.label}!* ${tier.tag}\n\nA ${tier.type} is wandering!\nType *.claim* to recruit ${tier.type === 'giant' ? 'it' : 'him'}!\n\n*Value:* ${tier.value.toLocaleString()}g | *Time:* ${tier.time}s`
+            ),
+          });
+        }
+      } catch (err) {
+        console.error('[drops] Error rolling drop:', err.message);
+      }
+    }
 
     const config = await botConfig.getConfig();
 
