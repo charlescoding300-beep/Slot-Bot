@@ -114,7 +114,11 @@ async function startBot() {
 
   sock.ev.on('creds.update', async () => {
     await saveCreds();
-    await backupSessionToMega();
+    try {
+      await backupSessionToMega();
+    } catch (err) {
+      console.error('[mega] Backup failed, continuing without backup:', err.message);
+    }
   });
 
   sock.ev.on('connection.update', async (update) => {
