@@ -30,21 +30,9 @@ async function buyHP(sock, msg, args, { from, sender }) {
   );
 }
 
-module.exports = [
-  { pattern: 'buyhp', alias: [], run: buyHP },
-  {
-    // Covers ".buy hp" (two words) since the command router splits on spaces
-    pattern: 'buy',
-    alias: [],
-    run: async (sock, msg, args, ctx) => {
-      if ((args[0] || '').toLowerCase() === 'hp') {
-        return buyHP(sock, msg, args, ctx);
-      }
-      return sock.sendMessage(
-        ctx.from,
-        { text: withWatermark('🙄 Usage: .buyhp (or .buy hp) to repair your barracks for 1000g.') },
-        { quoted: msg }
-      );
-    },
-  },
-];
+// Note: the ".buy"/".but" generic dispatcher (handles both "hp" and unit
+// types like "swordman") lives in commands/buyunit.js, which imports
+// buyHP from here — keeps ONE single source of truth for the "buy"
+// pattern instead of two files fighting over the same command name.
+module.exports = [{ pattern: 'buyhp', alias: [], run: buyHP }];
+module.exports.buyHP = buyHP;
