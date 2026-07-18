@@ -1,31 +1,18 @@
 require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 // index.js — CYBER X Army Bot main entry point
-//
-// Connection approach: copied directly from how Knightbot-MD and its whole
-// fork family (SubZero-MD, LiltenBot, etc.) actually do it — official
-// @whiskeysockets/baileys, local file auth (useMultiFileAuthState), backed
-// up to Mega.nz via a SESSION_ID so it survives Render wiping local disk
-// on restart. No Redis anywhere in the connection/session layer.
-//
-// (Game data — coins, army, everything players do — still saves to Upstash
-// Redis instantly via lib/gameStore.js / lib/barracksStore.js. That's a
-// completely separate system from the WhatsApp login session and is
-// untouched by this change.)
-//
-// @whiskeysockets/baileys (7.x) is ESM-only — it CANNOT be loaded with a
-// plain top-level require(), which crashes immediately with
-// ERR_REQUIRE_ESM. It's loaded below via a dynamic import() inside an
-// async loader instead, called once at startup before anything else needs
-// it, with the pieces we use stashed into module-level variables.
 
-let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
+let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestWaWebVersion;
 
 async function loadBaileys() {
   const baileys = await import('@whiskeysockets/baileys');
   makeWASocket = baileys.default;
   useMultiFileAuthState = baileys.useMultiFileAuthState;
   DisconnectReason = baileys.DisconnectReason;
-  fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
+  // fetchLatestWaWebVersion fetches the real current WA version directly
+  // from WhatsApp's servers. fetchLatestBaileysVersion() (the old call)
+  // returns stale version [2,3000,1035194821] that WhatsApp now rejects
+  // during device linking — confirmed bug in Baileys GitHub issue #2679.
+  fetchLatestWaWebVersion = baileys.fetchLatestWaWebVersion;
 }
 
 const { Boom } = require('@hapi/boom');
@@ -65,14 +52,23 @@ let currentSock = null;
 async function startBot() {
   if (!fs.existsSync(SESSIONS_DIR)) fs.mkdirSync(SESSIONS_DIR, { recursive: true });
 
-  // If we have a SESSION_ID saved from a previous run, pull the real
-  // creds.json down from Mega BEFORE Baileys ever looks for it locally.
   if (process.env.SESSION_ID && !fs.existsSync(path.join(SESSIONS_DIR, 'creds.json'))) {
     await restoreSessionFromMega(process.env.SESSION_ID);
   }
 
   const { state, saveCreds } = await useMultiFileAuthState(SESSIONS_DIR);
-  const { version } = await fetchLatestBaileysVersion();
+
+  // Use fetchLatestWaWebVersion() which hits WhatsApp's actual servers for
+  // the real current version. Falls back to hardcoded [2,3000,1042466098]
+  // (confirmed working as of July 2026) if the network call fails.
+  let version = [2, 3000, 1042466098];
+  try {
+    const versionInfo = await fetchLatestWaWebVersion();
+    version = versionInfo.version;
+    console.log(`[version] WA Web version: ${version.join('.')}`);
+  } catch (err) {
+    console.log(`[version] fetchLatestWaWebVersion failed, using hardcoded fallback: ${version.join('.')}`);
+  }
 
   const sock = makeWASocket({
     version,
@@ -87,30 +83,38 @@ async function startBot() {
     retryRequestDelayMs: 1000,
   });
 
-  if (!sock.authState.creds.registered) {
-    const number = (process.env.BOT_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
-    if (!number) {
-      console.error('❌ Set BOT_PHONE_NUMBER in your environment variables and redeploy.');
-      process.exit(1);
-    }
-    try {
-      const code = await sock.requestPairingCode(number);
-      console.log(`\n🔗 Pairing code for ${number}: ${code}\n`);
-      console.log('Enter this in WhatsApp: Linked Devices > Link with phone number\n');
-    } catch (err) {
-      console.error('[pairing] Failed to request pairing code:', err.message);
-    }
-  }
+  let pairingRequested = false;
 
   sock.ev.on('creds.update', async () => {
     await saveCreds();
-    // Keep the Mega backup fresh every time creds change (e.g. right after
-    // linking) so the SESSION_ID always reflects the latest working session.
     await backupSessionToMega();
   });
 
   sock.ev.on('connection.update', async (update) => {
     const { connection, lastDisconnect } = update;
+
+    // Request pairing code only once, only when socket is actually
+    // connecting and not already registered — avoids racing the handshake.
+    if (
+      connection === 'connecting' &&
+      !sock.authState.creds.registered &&
+      !pairingRequested
+    ) {
+      pairingRequested = true;
+      const number = (process.env.BOT_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
+      if (!number) {
+        console.error('❌ Set BOT_PHONE_NUMBER in your environment variables and redeploy.');
+        process.exit(1);
+      }
+      try {
+        const code = await sock.requestPairingCode(number);
+        console.log(`\n🔗 Pairing code for ${number}: ${code}\n`);
+        console.log('Enter this in WhatsApp: Linked Devices > Link with phone number\n');
+      } catch (err) {
+        console.error('[pairing] Failed to request pairing code:', err.message);
+        pairingRequested = false;
+      }
+    }
 
     if (connection === 'close') {
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
@@ -126,9 +130,7 @@ async function startBot() {
         console.log('[session] Logged out — delete sessions/creds.json and unset SESSION_ID to re-pair.');
       } else {
         console.log('[reconnect] Reconnecting...');
-        try {
-          sock.end(undefined);
-        } catch (_) {}
+        try { sock.end(undefined); } catch (_) {}
         currentSock = await startBot();
       }
     } else if (connection === 'open') {
@@ -212,7 +214,7 @@ async function startBot() {
 function startKeepAlivePing() {
   const selfUrl = process.env.RENDER_EXTERNAL_URL;
   if (!selfUrl) {
-    console.log('[keepalive] RENDER_EXTERNAL_URL not set — skipping self-ping (fine for local dev).');
+    console.log('[keepalive] RENDER_EXTERNAL_URL not set — skipping self-ping.');
     return;
   }
   setInterval(async () => {
