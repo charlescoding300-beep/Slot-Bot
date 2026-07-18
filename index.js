@@ -165,10 +165,10 @@ async function startBot() {
     if (type !== 'notify') return;
     const msg = messages[0];
     systemGuard.markActivity();
-    if (!msg.message || msg.key.fromMe) return;
+    if (!msg.message) return;
 
     const from = msg.key.remoteJid;
-    const sender = msg.key.participant || msg.key.remoteJid;
+    const sender = msg.key.fromMe ? sock.user.id : (msg.key.participant || msg.key.remoteJid);
 
     if (from.endsWith('@g.us')) {
       try {
