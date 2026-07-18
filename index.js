@@ -11,13 +11,23 @@ require('dotenv').config({ path: require('path').join(__dirname, '.env') });
 // Redis instantly via lib/gameStore.js / lib/barracksStore.js. That's a
 // completely separate system from the WhatsApp login session and is
 // untouched by this change.)
+//
+// @whiskeysockets/baileys (7.x) is ESM-only — it CANNOT be loaded with a
+// plain top-level require(), which crashes immediately with
+// ERR_REQUIRE_ESM. It's loaded below via a dynamic import() inside an
+// async loader instead, called once at startup before anything else needs
+// it, with the pieces we use stashed into module-level variables.
 
-const {
-  default: makeWASocket,
-  useMultiFileAuthState,
-  DisconnectReason,
-  fetchLatestBaileysVersion,
-} = require('@whiskeysockets/baileys');
+let makeWASocket, useMultiFileAuthState, DisconnectReason, fetchLatestBaileysVersion;
+
+async function loadBaileys() {
+  const baileys = await import('@whiskeysockets/baileys');
+  makeWASocket = baileys.default;
+  useMultiFileAuthState = baileys.useMultiFileAuthState;
+  DisconnectReason = baileys.DisconnectReason;
+  fetchLatestBaileysVersion = baileys.fetchLatestBaileysVersion;
+}
+
 const { Boom } = require('@hapi/boom');
 const fs = require('fs');
 const path = require('path');
@@ -222,6 +232,7 @@ function startKeepAlivePing() {
     if (currentSock) currentSock.end(new Error('stale connection watchdog restart'));
   });
 
+  await loadBaileys();
   currentSock = await startBot();
 })();
 
