@@ -8,10 +8,6 @@ async function loadBaileys() {
   makeWASocket = baileys.default;
   useMultiFileAuthState = baileys.useMultiFileAuthState;
   DisconnectReason = baileys.DisconnectReason;
-  // fetchLatestWaWebVersion fetches the real current WA version directly
-  // from WhatsApp's servers. fetchLatestBaileysVersion() (the old call)
-  // returns stale version [2,3000,1035194821] that WhatsApp now rejects
-  // during device linking — confirmed bug in Baileys GitHub issue #2679.
   fetchLatestWaWebVersion = baileys.fetchLatestWaWebVersion;
 }
 
@@ -32,12 +28,10 @@ function loadCommands() {
   commands.clear();
   const dir = path.join(__dirname, 'commands');
   const files = fs.readdirSync(dir).filter((f) => f.endsWith('.js'));
-
   for (const file of files) {
     delete require.cache[require.resolve(path.join(dir, file))];
     const mod = require(path.join(dir, file));
     const entries = Array.isArray(mod) ? mod : [mod];
-
     for (const cmd of entries) {
       if (!cmd || !cmd.pattern || !cmd.run) continue;
       commands.set(cmd.pattern, cmd);
@@ -45,6 +39,18 @@ function loadCommands() {
     }
   }
   console.log(`✅ Loaded ${files.length} command files (${commands.size} triggers)`);
+}
+
+function clearSessionFolder() {
+  try {
+    if (fs.existsSync(SESSIONS_DIR)) {
+      fs.rmSync(SESSIONS_DIR, { recursive: true, force: true });
+      console.log('[session] Cleared stale session folder.');
+    }
+    fs.mkdirSync(SESSIONS_DIR, { recursive: true });
+  } catch (err) {
+    console.error('[session] Failed to clear session folder:', err.message);
+  }
 }
 
 let currentSock = null;
@@ -58,16 +64,13 @@ async function startBot() {
 
   const { state, saveCreds } = await useMultiFileAuthState(SESSIONS_DIR);
 
-  // Use fetchLatestWaWebVersion() which hits WhatsApp's actual servers for
-  // the real current version. Falls back to hardcoded [2,3000,1042466098]
-  // (confirmed working as of July 2026) if the network call fails.
   let version = [2, 3000, 1042466098];
   try {
     const versionInfo = await fetchLatestWaWebVersion();
     version = versionInfo.version;
     console.log(`[version] WA Web version: ${version.join('.')}`);
   } catch (err) {
-    console.log(`[version] fetchLatestWaWebVersion failed, using hardcoded fallback: ${version.join('.')}`);
+    console.log(`[version] Using hardcoded fallback: ${version.join('.')}`);
   }
 
   const sock = makeWASocket({
@@ -83,29 +86,21 @@ async function startBot() {
     retryRequestDelayMs: 1000,
   });
 
+  // Request pairing code immediately after socket creation with a small
+  // delay — this is the standard Baileys pattern that works reliably.
+  // The 'connecting' state fires before the socket transport is ready,
+  // causing requestPairingCode to fail with "Connection Closed" if called
+  // there. A 3s delay gives the socket time to initialize properly.
   let pairingRequested = false;
-
-  sock.ev.on('creds.update', async () => {
-    await saveCreds();
-    await backupSessionToMega();
-  });
-
-  sock.ev.on('connection.update', async (update) => {
-    const { connection, lastDisconnect } = update;
-
-    // Request pairing code only once, only when socket is actually
-    // connecting and not already registered — avoids racing the handshake.
-    if (
-      connection === 'connecting' &&
-      !sock.authState.creds.registered &&
-      !pairingRequested
-    ) {
+  if (!sock.authState.creds.registered) {
+    const number = (process.env.BOT_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
+    if (!number) {
+      console.error('❌ Set BOT_PHONE_NUMBER in your environment variables and redeploy.');
+      process.exit(1);
+    }
+    setTimeout(async () => {
+      if (pairingRequested || sock.authState.creds.registered) return;
       pairingRequested = true;
-      const number = (process.env.BOT_PHONE_NUMBER || '').replace(/[^0-9]/g, '');
-      if (!number) {
-        console.error('❌ Set BOT_PHONE_NUMBER in your environment variables and redeploy.');
-        process.exit(1);
-      }
       try {
         const code = await sock.requestPairingCode(number);
         console.log(`\n🔗 Pairing code for ${number}: ${code}\n`);
@@ -114,7 +109,16 @@ async function startBot() {
         console.error('[pairing] Failed to request pairing code:', err.message);
         pairingRequested = false;
       }
-    }
+    }, 3000);
+  }
+
+  sock.ev.on('creds.update', async () => {
+    await saveCreds();
+    await backupSessionToMega();
+  });
+
+  sock.ev.on('connection.update', async (update) => {
+    const { connection, lastDisconnect } = update;
 
     if (connection === 'close') {
       const statusCode = new Boom(lastDisconnect?.error)?.output?.statusCode;
@@ -127,7 +131,11 @@ async function startBot() {
       console.log('=======================================');
 
       if (loggedOut) {
-        console.log('[session] Logged out — delete sessions/creds.json and unset SESSION_ID to re-pair.');
+        // Session is dead — clear the folder so the next attempt starts
+        // fresh and requests a brand new pairing code automatically.
+        console.log('[session] Logged out — clearing stale session and restarting fresh...');
+        clearSessionFolder();
+        currentSock = await startBot();
       } else {
         console.log('[reconnect] Reconnecting...');
         try { sock.end(undefined); } catch (_) {}
